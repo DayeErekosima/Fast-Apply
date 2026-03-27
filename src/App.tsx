@@ -53,7 +53,7 @@ declare global {
 }
 
 // --- Constants ---
-const CLAUDE_API_URL = "https://api.anthropic.com/v1/messages";
+const CLAUDE_API_URL = '/api/claude';
 const CLAUDE_MODEL = "claude-3-5-sonnet-20240620"; // Updated to latest available Claude 3.5 Sonnet
 
 // --- Helper Functions ---
