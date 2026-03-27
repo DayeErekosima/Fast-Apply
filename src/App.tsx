@@ -35,7 +35,13 @@ import {
   Lightbulb,
   Plus,
   X,
-  Loader2
+  Loader2,
+  Link,
+  Globe,
+  File,
+  UploadCloud,
+  FileCheck,
+  FileWarning
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { saveAs } from 'file-saver';
@@ -49,12 +55,14 @@ declare global {
     jspdf: any;
     html2canvas: any;
     Chart: any;
+    pdfjsLib: any;
+    mammoth: any;
   }
 }
 
 // --- Constants ---
-const CLAUDE_API_URL = '/api/claude';
-const CLAUDE_MODEL = "claude-3-5-sonnet-20240620"; // Updated to latest available Claude 3.5 Sonnet
+const GROQ_API_URL = "/api/groq";
+const GROQ_MODEL = "llama-3.3-70b-versatile";
 
 // --- Helper Functions ---
 const extractKeywords = (text: string): string[] => {
@@ -126,6 +134,142 @@ export default function App() {
   const [starAnswers, setStarAnswers] = useState<StarAnswer[]>([]);
   const [isPolishingStar, setIsPolishingStar] = useState(false);
 
+  const [jdInputMode, setJdInputMode] = useState<'paste' | 'link'>('paste');
+  const [cvInputMode, setCvInputMode] = useState<'paste' | 'upload'>('paste');
+  const [jdUrl, setJdUrl] = useState('');
+  const [isFetchingJd, setIsFetchingJd] = useState(false);
+  const [isEditingExtractedJd, setIsEditingExtractedJd] = useState(false);
+  const [uploadedFile, setUploadedFile] = useState<File | null>(null);
+  const [isParsingFile, setIsParsingFile] = useState(false);
+  const [isEditingExtractedCv, setIsEditingExtractedCv] = useState(false);
+  const [isDragging, setIsDragging] = useState(false);
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(true);
+  };
+
+  const handleDragLeave = () => {
+    setIsDragging(false);
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(false);
+    const file = e.dataTransfer.files[0];
+    if (file) handleFileUpload(file);
+  };
+
+  const handleFetchJobDescription = async () => {
+    if (!jdUrl.trim()) return;
+    setIsFetchingJd(true);
+    setError(null);
+
+    const systemPrompt = `The user has provided this URL: ${jdUrl}. 
+
+Using your web browsing capability, fetch the contents of this page and extract ONLY the job description content. Remove all navigation, headers, footers, ads, and irrelevant page content. Return only:
+
+[JOB_TITLE] — the exact job title
+[COMPANY] — the company name if visible
+[LOCATION] — the location if visible  
+[JOB_DESCRIPTION] — the full cleaned job description text including responsibilities, requirements, and any other relevant sections
+
+If you cannot access the URL or it is not a job posting, say so clearly.`;
+
+    try {
+      const result = await callGroq(`Fetch job description from ${jdUrl}`, systemPrompt);
+      
+      if (result.toLowerCase().includes("cannot access") || result.toLowerCase().includes("not a job posting")) {
+        throw new Error("We couldn't fetch this page automatically — please paste the job description text manually");
+      }
+
+      // Parse result
+      const jobTitleMatch = result.match(/\[JOB_TITLE\]\s*—?\s*(.*)/i);
+      const companyMatch = result.match(/\[COMPANY\]\s*—?\s*(.*)/i);
+      const locationMatch = result.match(/\[LOCATION\]\s*—?\s*(.*)/i);
+      const jdMatch = result.match(/\[JOB_DESCRIPTION\]\s*—?\s*([\s\S]*)/i);
+
+      if (jobTitleMatch) setCvData(prev => ({ ...prev, targetJobTitle: jobTitleMatch[1].trim() }));
+      if (companyMatch) setCvData(prev => ({ ...prev, company: companyMatch[1].trim() }));
+      if (locationMatch) setCvData(prev => ({ ...prev, location: locationMatch[1].trim() }));
+      
+      if (jdMatch) {
+        setCvData(prev => ({ ...prev, jobDescription: jdMatch[1].trim() }));
+      } else {
+        // Fallback to whole result if markers missing but it seems to have content
+        setCvData(prev => ({ ...prev, jobDescription: result }));
+      }
+
+    } catch (err: any) {
+      setError(err.message || "We couldn't fetch this page automatically — please paste the job description text manually");
+      setJdInputMode('paste');
+    } finally {
+      setIsFetchingJd(false);
+    }
+  };
+
+  const handleFileUpload = async (file: File) => {
+    if (file.size > 5 * 1024 * 1024) {
+      setError("File exceeds 5MB limit");
+      return;
+    }
+
+    const extension = file.name.split('.').pop()?.toLowerCase();
+    if (!['pdf', 'docx', 'txt', 'doc'].includes(extension || '')) {
+      setError("Only PDF, DOCX, and TXT files are supported");
+      return;
+    }
+
+    if (extension === 'doc') {
+      setError("Legacy .doc files are not supported — please save your CV as .docx or .pdf and re-upload");
+      return;
+    }
+
+    setUploadedFile(file);
+    setIsParsingFile(true);
+    setError(null);
+
+    try {
+      let text = '';
+      if (extension === 'txt') {
+        text = await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result as string);
+          reader.onerror = reject;
+          reader.readAsText(file);
+        });
+      } else if (extension === 'pdf') {
+        const arrayBuffer = await file.arrayBuffer();
+        const pdf = await window.pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+        let fullText = '';
+        for (let i = 1; i <= pdf.numPages; i++) {
+          const page = await pdf.getPage(i);
+          const textContent = await page.getTextContent();
+          const pageText = textContent.items.map((item: any) => (item as any).str).join(' ');
+          fullText += pageText + '\n';
+        }
+        text = fullText;
+      } else if (extension === 'docx') {
+        const arrayBuffer = await file.arrayBuffer();
+        const result = await window.mammoth.extractRawValue({ arrayBuffer });
+        text = result.value;
+      }
+
+      if (!text.trim()) {
+        throw new Error("No text could be extracted from this file — please paste your CV manually");
+      }
+
+      setCvData(prev => ({ ...prev, currentCV: text }));
+      setCvInputMode('paste'); // Automatically switch to paste mode as per prompt
+
+    } catch (err: any) {
+      setError(err.message || "Could not read this file automatically — please copy and paste the text instead");
+      setUploadedFile(null);
+    } finally {
+      setIsParsingFile(false);
+    }
+  };
+
   useEffect(() => {
     if (activeTab === 'skills' && skillsGap) {
       const timer = setTimeout(() => {
@@ -189,6 +333,8 @@ export default function App() {
   const [cvData, setCvData] = useState<CVData>({
     name: '',
     targetJobTitle: '',
+    company: '',
+    location: '',
     seniority: 'Mid-level',
     industry: 'Technology',
     currentCV: '',
@@ -216,33 +362,44 @@ export default function App() {
     setCvData(prev => ({ ...prev, [name]: value }));
   };
 
-  const callClaude = async (prompt: string, systemPrompt: string) => {
+  const callGroq = async (prompt: string, systemPrompt: string) => {
     if (!apiKey) {
-      throw new Error("Please enter your Anthropic API key in Settings to use AI features.");
+      throw new Error("Please enter your Groq API key in Settings to use AI features.");
     }
 
-    const response = await fetch(CLAUDE_API_URL, {
+    const response = await fetch(GROQ_API_URL, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        'x-api-key': process.env.ANTHROPIC_API_KEY!,
-        "anthropic-version": "2023-06-01",
       },
       body: JSON.stringify({
-        model: CLAUDE_MODEL,
+        model: GROQ_MODEL,
         max_tokens: 4000,
-        system: systemPrompt,
-        messages: [{ role: "user", content: prompt }]
+        temperature: 0.7,
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: prompt }
+        ]
       })
     });
 
     if (!response.ok) {
       const errorData = await response.json();
-      throw new Error(errorData.error?.message || "Failed to call Claude API");
+      if (response.status === 401) {
+        throw new Error("Invalid Groq API key — please check your key in Settings");
+      } else if (response.status === 429) {
+        throw new Error("Too many requests — please wait a moment and try again");
+      } else if (response.status === 503) {
+        throw new Error("Groq is temporarily unavailable — please try again in a few seconds");
+      }
+      throw new Error(errorData.error?.message || "Groq API error — please check your Groq API key is valid");
     }
 
     const data = await response.json();
-    return data.content[0].text;
+    if (data.error) {
+      throw new Error(data.error.message || 'Groq API error');
+    }
+    return data.choices[0].message.content;
   };
 
   const parseCVSections = (text: string): CVSections => {
@@ -289,7 +446,7 @@ export default function App() {
       return;
     }
     if (!apiKey) {
-      setError("Please enter your Anthropic API key in Settings");
+      setError("Please enter your Groq API key in Settings");
       setShowSettings(true);
       return;
     }
@@ -340,7 +497,7 @@ ${cvData.jobDescription}
     `;
 
     try {
-      const result = await callClaude(prompt, systemPrompt);
+      const result = await callGroq(prompt, systemPrompt);
       const sections = parseCVSections(result);
       setTailoredCV(sections);
       
@@ -368,7 +525,7 @@ ${tailoredCV[sectionKey]}
     `;
 
     try {
-      const result = await callClaude(prompt, systemPrompt);
+      const result = await callGroq(prompt, systemPrompt);
       setTailoredCV(prev => prev ? { ...prev, [sectionKey]: result } : null);
     } catch (err: any) {
       setError(err.message);
@@ -390,7 +547,7 @@ ${tailoredCV.experience}
     `;
 
     try {
-      const result = await callClaude(prompt, systemPrompt);
+      const result = await callGroq(prompt, systemPrompt);
       setTailoredCV(prev => prev ? { ...prev, experience: prev.experience + '\n• ' + result } : null);
     } catch (err: any) {
       setError(err.message);
@@ -631,7 +788,7 @@ Format clearly with the category markers above so the app can parse and display 
     const prompt = `CV: ${Object.values(tailoredCV).join('\n')}\n\nJob Description: ${cvData.jobDescription}`;
     
     try {
-      const result = await callClaude(prompt, systemPrompt);
+      const result = await callGroq(prompt, systemPrompt);
       const parsed = parseInterviewPrep(result);
       setInterviewPrep(parsed);
     } catch (err: any) {
@@ -708,7 +865,7 @@ Format clearly with the category markers above so the app can parse and display 
     const prompt = `CV: ${Object.values(tailoredCV).join('\n')}\n\nJob Description: ${cvData.jobDescription}`;
 
     try {
-      const result = await callClaude(prompt, systemPrompt);
+      const result = await callGroq(prompt, systemPrompt);
       const parsed = parseSkillsGap(result);
       setSkillsGap(parsed);
     } catch (err: any) {
@@ -843,7 +1000,7 @@ Format clearly with the category markers above so the app can parse and display 
     const prompt = `Question: ${star.question}\nSituation: ${star.situation}\nTask: ${star.task}\nAction: ${star.action}\nResult: ${star.result}\n\nReturn the polished version in STAR format.`;
 
     try {
-      const result = await callClaude(prompt, systemPrompt);
+      const result = await callGroq(prompt, systemPrompt);
       // Parse the result back into STAR fields if possible, or just update the fields
       // For simplicity, let's assume the AI returns a structured response or we just update the fields with the whole thing
       // In a real app, we'd parse it. Here we'll just update the fields if we can find markers.
@@ -1316,25 +1473,238 @@ Format clearly with the category markers above so the app can parse and display 
                 className="w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none text-sm"
               />
             </div>
-            <div className="flex-1 min-h-0 flex flex-col">
-              <label className="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1.5">Current CV Text</label>
-              <textarea 
-                name="currentCV"
-                value={cvData.currentCV}
-                onChange={handleInputChange}
-                placeholder="Paste your current CV here..."
-                className="flex-1 w-full p-3 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none text-sm resize-none min-h-[150px]"
-              />
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1.5">Company</label>
+                <input 
+                  type="text" 
+                  name="company"
+                  value={cvData.company}
+                  onChange={handleInputChange}
+                  placeholder="e.g. Google"
+                  className="w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none text-sm"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1.5">Location</label>
+                <input 
+                  type="text" 
+                  name="location"
+                  value={cvData.location}
+                  onChange={handleInputChange}
+                  placeholder="e.g. London"
+                  className="w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none text-sm"
+                />
+              </div>
             </div>
             <div className="flex-1 min-h-0 flex flex-col">
-              <label className="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1.5">Job Description</label>
-              <textarea 
-                name="jobDescription"
-                value={cvData.jobDescription}
-                onChange={handleInputChange}
-                placeholder="Paste the target job description here..."
-                className="flex-1 w-full p-3 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none text-sm resize-none min-h-[150px]"
-              />
+              <div className="flex items-center justify-between mb-1.5">
+                <label className="block text-xs font-bold uppercase tracking-wider text-slate-500">Your CV</label>
+                <div className="flex bg-slate-100 dark:bg-slate-800 p-0.5 rounded-lg">
+                  <button 
+                    onClick={() => setCvInputMode('paste')}
+                    className={`px-2 py-1 text-[10px] font-bold rounded-md transition-all ${cvInputMode === 'paste' ? 'bg-white dark:bg-slate-700 text-blue-600 shadow-sm' : 'text-slate-500'}`}
+                  >
+                    PASTE
+                  </button>
+                  <button 
+                    onClick={() => setCvInputMode('upload')}
+                    className={`px-2 py-1 text-[10px] font-bold rounded-md transition-all ${cvInputMode === 'upload' ? 'bg-white dark:bg-slate-700 text-blue-600 shadow-sm' : 'text-slate-500'}`}
+                  >
+                    UPLOAD
+                  </button>
+                </div>
+              </div>
+
+              <AnimatePresence mode="wait">
+                {cvInputMode === 'paste' ? (
+                  <motion.div 
+                    key="cv-paste"
+                    initial={{ opacity: 0, y: 5 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: -5 }}
+                    transition={{ duration: 0.2 }}
+                    className="flex-1 flex flex-col"
+                  >
+                    <textarea 
+                      name="currentCV"
+                      value={cvData.currentCV}
+                      onChange={handleInputChange}
+                      placeholder="Paste your current CV here..."
+                      className="flex-1 w-full p-3 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none text-sm resize-none min-h-[150px]"
+                    />
+                  </motion.div>
+                ) : (
+                  <motion.div 
+                    key="cv-upload"
+                    initial={{ opacity: 0, y: 5 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: -5 }}
+                    transition={{ duration: 0.2 }}
+                    className="flex-1 flex flex-col"
+                  >
+                    {!uploadedFile ? (
+                      <div 
+                        onDragOver={handleDragOver}
+                        onDragLeave={handleDragLeave}
+                        onDrop={handleDrop}
+                        className={`flex-1 flex flex-col items-center justify-center border-2 border-dashed rounded-lg p-4 transition-all ${isDragging ? 'border-blue-500 bg-blue-50/50 dark:bg-blue-900/20' : 'border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-900/50'}`}
+                      >
+                        <UploadCloud className={`w-8 h-8 mb-2 ${isDragging ? 'text-blue-500' : 'text-slate-400'}`} />
+                        <p className="text-xs font-medium text-slate-600 dark:text-slate-400 text-center mb-1">
+                          Drag & drop your CV here
+                        </p>
+                        <p className="text-[10px] text-slate-400 text-center mb-3">
+                          PDF, DOCX, or TXT (Max 5MB)
+                        </p>
+                        <label className="cursor-pointer px-3 py-1.5 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-md text-[11px] font-bold text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors">
+                          Browse Files
+                          <input 
+                            type="file" 
+                            className="hidden" 
+                            accept=".pdf,.docx,.txt,.doc"
+                            onChange={(e) => {
+                              const file = e.target.files?.[0];
+                              if (file) handleFileUpload(file);
+                            }}
+                          />
+                        </label>
+                      </div>
+                    ) : (
+                      <div className="flex-1 flex flex-col bg-slate-50/50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-800 rounded-lg p-3">
+                        <div className="flex items-center justify-between mb-3 p-2 bg-white dark:bg-slate-800 rounded-md border border-slate-100 dark:border-slate-700 shadow-sm">
+                          <div className="flex items-center gap-2 overflow-hidden">
+                            <div className="p-1.5 bg-blue-50 dark:bg-blue-900/30 rounded">
+                              <FileText className="w-4 h-4 text-blue-600 dark:text-blue-400" />
+                            </div>
+                            <div className="overflow-hidden">
+                              <p className="text-[11px] font-bold text-slate-700 dark:text-slate-200 truncate">{uploadedFile.name}</p>
+                              <p className="text-[10px] text-slate-500">{(uploadedFile.size / 1024 / 1024).toFixed(2)} MB</p>
+                            </div>
+                          </div>
+                          <button 
+                            onClick={() => {
+                              setUploadedFile(null);
+                              setCvData(prev => ({ ...prev, currentCV: '' }));
+                            }}
+                            className="p-1 hover:bg-red-50 dark:hover:bg-red-900/20 text-slate-400 hover:text-red-500 transition-colors"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+
+                        <div className="flex-1 flex flex-col min-h-0">
+                          <div className="flex items-center justify-between mb-1">
+                            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Extracted Text</span>
+                            <button 
+                              onClick={() => setIsEditingExtractedCv(!isEditingExtractedCv)}
+                              className="text-[10px] font-bold text-blue-600 hover:underline"
+                            >
+                              {isEditingExtractedCv ? 'Lock' : 'Edit'}
+                            </button>
+                          </div>
+                          <textarea 
+                            readOnly={!isEditingExtractedCv}
+                            value={cvData.currentCV}
+                            onChange={(e) => setCvData(prev => ({ ...prev, currentCV: e.target.value }))}
+                            className={`flex-1 w-full p-2 text-[11px] bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-md outline-none resize-none ${!isEditingExtractedCv ? 'opacity-70' : 'focus:ring-1 focus:ring-blue-500'}`}
+                          />
+                        </div>
+                      </div>
+                    )}
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </div>
+            <div className="flex-1 min-h-0 flex flex-col">
+              <div className="flex items-center justify-between mb-1.5">
+                <label className="block text-xs font-bold uppercase tracking-wider text-slate-500">Job Description</label>
+                <div className="flex bg-slate-100 dark:bg-slate-800 p-0.5 rounded-lg">
+                  <button 
+                    onClick={() => setJdInputMode('paste')}
+                    className={`px-2 py-1 text-[10px] font-bold rounded-md transition-all ${jdInputMode === 'paste' ? 'bg-white dark:bg-slate-700 text-blue-600 shadow-sm' : 'text-slate-500'}`}
+                  >
+                    PASTE
+                  </button>
+                  <button 
+                    onClick={() => setJdInputMode('link')}
+                    className={`px-2 py-1 text-[10px] font-bold rounded-md transition-all ${jdInputMode === 'link' ? 'bg-white dark:bg-slate-700 text-blue-600 shadow-sm' : 'text-slate-500'}`}
+                  >
+                    LINK
+                  </button>
+                </div>
+              </div>
+
+              <AnimatePresence mode="wait">
+                {jdInputMode === 'paste' ? (
+                  <motion.div 
+                    key="jd-paste"
+                    initial={{ opacity: 0, y: 5 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: -5 }}
+                    transition={{ duration: 0.2 }}
+                    className="flex-1 flex flex-col"
+                  >
+                    <textarea 
+                      name="jobDescription"
+                      value={cvData.jobDescription}
+                      onChange={handleInputChange}
+                      placeholder="Paste the target job description here..."
+                      className="flex-1 w-full p-3 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none text-sm resize-none min-h-[150px]"
+                    />
+                  </motion.div>
+                ) : (
+                  <motion.div 
+                    key="jd-link"
+                    initial={{ opacity: 0, y: 5 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: -5 }}
+                    transition={{ duration: 0.2 }}
+                    className="flex-1 flex flex-col space-y-3"
+                  >
+                    <div className="flex gap-2">
+                      <div className="relative flex-1">
+                        <Link className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                        <input 
+                          type="url"
+                          value={jdUrl}
+                          onChange={(e) => setJdUrl(e.target.value)}
+                          placeholder="https://linkedin.com/jobs/..."
+                          className="w-full pl-9 pr-3 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none text-sm"
+                        />
+                      </div>
+                      <button 
+                        onClick={handleFetchJobDescription}
+                        disabled={isFetchingJd || !jdUrl}
+                        className="px-3 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-slate-200 dark:disabled:bg-slate-800 text-white disabled:text-slate-400 rounded-lg font-bold text-xs transition-all flex items-center gap-2"
+                      >
+                        {isFetchingJd ? <Loader2 className="w-4 h-4 animate-spin" /> : <Globe className="w-4 h-4" />}
+                        Fetch
+                      </button>
+                    </div>
+
+                    {cvData.jobDescription && (
+                      <div className="flex-1 flex flex-col bg-slate-50/50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-800 rounded-lg p-3 min-h-0">
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Extracted Description</span>
+                          <button 
+                            onClick={() => setIsEditingExtractedJd(!isEditingExtractedJd)}
+                            className="text-[10px] font-bold text-blue-600 hover:underline"
+                          >
+                            {isEditingExtractedJd ? 'Lock' : 'Edit'}
+                          </button>
+                        </div>
+                        <textarea 
+                          readOnly={!isEditingExtractedJd}
+                          value={cvData.jobDescription}
+                          onChange={(e) => setCvData(prev => ({ ...prev, jobDescription: e.target.value }))}
+                          className={`flex-1 w-full p-2 text-[11px] bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-md outline-none resize-none ${!isEditingExtractedJd ? 'opacity-70' : 'focus:ring-1 focus:ring-blue-500'}`}
+                        />
+                      </div>
+                    )}
+                  </motion.div>
+                )}
+              </AnimatePresence>
             </div>
             
             <button 
@@ -1605,13 +1975,13 @@ Format clearly with the category markers above so the app can parse and display 
               </div>
               <div className="p-6 space-y-6">
                 <div>
-                  <label className="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-2">Anthropic API Key</label>
+                  <label className="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-2">Groq API Key</label>
                   <div className="relative">
                     <input 
                       type={showApiKey ? "text" : "password"}
                       value={apiKey}
                       onChange={(e) => setApiKey(e.target.value)}
-                      placeholder="sk-ant-..."
+                      placeholder="gsk_..."
                       className="w-full pl-3 pr-10 py-2.5 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl outline-none focus:ring-2 focus:ring-blue-500 text-sm"
                     />
                     <button 
@@ -1621,7 +1991,7 @@ Format clearly with the category markers above so the app can parse and display 
                       {showApiKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                     </button>
                   </div>
-                  <p className="mt-2 text-[10px] text-slate-400 leading-relaxed">Your API key is stored only in memory and will be cleared when you refresh the page. We never store it on any server.</p>
+                  <p className="mt-2 text-[10px] text-slate-400 leading-relaxed">Get your free key at <a href="https://console.groq.com" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline font-medium">console.groq.com</a>. Your key is stored locally in your browser.</p>
                 </div>
                 <div className="space-y-4 pt-4 border-t border-slate-100 dark:border-slate-800">
                   <h4 className="text-xs font-bold uppercase tracking-wider text-slate-500 flex items-center gap-2">

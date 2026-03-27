@@ -1,6 +1,8 @@
 export interface CVData {
   name: string;
   targetJobTitle: string;
+  company?: string;
+  location?: string;
   seniority: string;
   industry: string;
   currentCV: string;
