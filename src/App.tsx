@@ -251,7 +251,7 @@ If you cannot access the URL or it is not a job posting, say so clearly.`;
         text = fullText;
       } else if (extension === 'docx') {
         const arrayBuffer = await file.arrayBuffer();
-        const result = await window.mammoth.extractRawValue({ arrayBuffer });
+        const result = await window.mammoth.extractRawText({ arrayBuffer });
         text = result.value;
       }
 
