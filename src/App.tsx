@@ -41,12 +41,35 @@ import {
   File,
   UploadCloud,
   FileCheck,
-  FileWarning
+  FileWarning,
+  Type,
+  Maximize2,
+  Minimize2,
+  AlignLeft,
+  AlignCenter,
+  AlignRight,
+  Youtube,
+  ArrowUpRight,
+  Play
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { saveAs } from 'file-saver';
 import { Document, Packer, Paragraph, TextRun, HeadingLevel, AlignmentType, BorderStyle } from 'docx';
-import { CVData, CVSections, CVVersion, UK_SPELLING_MAP, EmailSettings, InterviewPrepData, SkillsGapData, StarAnswer, InterviewQuestion } from './types';
+import { 
+  CVData, 
+  CVSections, 
+  CVVersion, 
+  UK_SPELLING_MAP, 
+  EmailSettings, 
+  InterviewPrepData, 
+  SkillsGapData, 
+  StarAnswer, 
+  InterviewQuestion,
+  ContactInfo,
+  FormattingOptions,
+  TrainingArea,
+  TrainingPlanData
+} from './types';
 
 // --- Type Declarations for CDNs ---
 declare global {
@@ -82,6 +105,31 @@ const calculateMatchScore = (cvText: string, jdText: string) => {
   
   const score = Math.round((found.length / jdKeywords.length) * 100);
   return { score, found, missing };
+};
+
+const cleanCVOutput = (text: string): string => {
+  return text
+    // Remove note patterns
+    .replace(/\[.*?\]/g, (match) => {
+      // Keep section markers
+      const markers = ['[PERSONAL_STATEMENT]', '[KEY_SKILLS]', '[EXPERIENCE]', '[EDUCATION]', '[ADDITIONAL]'];
+      return markers.includes(match) ? match : '';
+    })
+    .replace(/Note:.*$/gm, '')
+    .replace(/\*Note:.*$/gm, '')
+    .replace(/Consider.*$/gm, '')
+    .replace(/You (may|might|could|should).*$/gm, '')
+    .replace(/\(Add.*?\)/g, '')
+    .replace(/\[Add.*?\]/g, '')
+    .replace(/\[Insert.*?\]/g, '')
+    .replace(/\[Your.*?\]/g, '')
+    .replace(/TODO:.*$/gm, '')
+    .replace(/PLACEHOLDER.*$/gm, '')
+    // Remove any lines that are clearly meta-commentary (start with common AI commentary phrases)
+    .replace(/^(Here is|Here's|I have|I've|Below is|The following|As requested|Please note|Important:|Tip:).*$/gm, '')
+    // Clean up extra blank lines left behind
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
 };
 
 const checkUKStandards = (text: string) => {
@@ -134,8 +182,21 @@ export default function App() {
   const [starAnswers, setStarAnswers] = useState<StarAnswer[]>([]);
   const [isPolishingStar, setIsPolishingStar] = useState(false);
 
+  const [contactInfo, setContactInfo] = useState<ContactInfo>({
+    fullName: '',
+    email: '',
+    phone: '',
+    location: '',
+    linkedin: '',
+    portfolio: '',
+    github: '',
+    website: '',
+    customFields: []
+  });
+  const [extractedFields, setExtractedFields] = useState<string[]>([]);
+  const [isExtractingContact, setIsExtractingContact] = useState(false);
+  const [cvInputMode, setCvInputMode] = useState<'upload' | 'paste'>('upload');
   const [jdInputMode, setJdInputMode] = useState<'paste' | 'link'>('paste');
-  const [cvInputMode, setCvInputMode] = useState<'paste' | 'upload'>('paste');
   const [jdUrl, setJdUrl] = useState('');
   const [isFetchingJd, setIsFetchingJd] = useState(false);
   const [isEditingExtractedJd, setIsEditingExtractedJd] = useState(false);
@@ -144,6 +205,189 @@ export default function App() {
   const [isEditingExtractedCv, setIsEditingExtractedCv] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
 
+  const [cvData, setCvData] = useState<CVData>({
+    name: '',
+    targetJobTitle: '',
+    company: '',
+    location: '',
+    seniority: 'Mid-level',
+    industry: 'Technology',
+    currentCV: '',
+    jobDescription: ''
+  });
+
+  const [formatting, setFormatting] = useState<FormattingOptions>({
+    fontFamily: 'Calibri',
+    fontSize: '12pt',
+    spacing: 'Normal',
+    margin: 'Normal',
+    dividerStyle: 'Line',
+    headingStyle: 'Bold'
+  });
+
+  const getFormattingStyles = () => {
+    const fonts: Record<string, string> = {
+      'Calibri': 'Calibri, Candara, Segoe, "Segoe UI", Optima, Arial, sans-serif',
+      'Arial': 'Arial, Helvetica, sans-serif',
+      'Times New Roman': '"Times New Roman", Times, serif',
+      'Georgia': 'Georgia, serif',
+      'Garamond': 'Garamond, Baskerville, "Baskerville Old Face", "Hoefler Text", "Times New Roman", serif',
+      'Cambria': 'Cambria, Georgia, serif'
+    };
+
+    const lineHeights: Record<string, string> = {
+      'Compact': '1.2',
+      'Normal': '1.4',
+      'Relaxed': '1.6'
+    };
+
+    const margins: Record<string, string> = {
+      'Narrow': '15mm',
+      'Normal': '20mm',
+      'Wide': '25mm'
+    };
+
+    return {
+      fontFamily: fonts[formatting.fontFamily],
+      fontSize: formatting.fontSize,
+      lineHeight: lineHeights[formatting.spacing],
+      padding: margins[formatting.margin],
+    };
+  };
+
+  const getHeadingStyle = () => {
+    switch (formatting.headingStyle) {
+      case 'Uppercase': return 'uppercase font-bold';
+      case 'SmallCaps': return 'font-bold [font-variant:small-caps]';
+      default: return 'font-bold';
+    }
+  };
+
+  const getDividerStyle = () => {
+    switch (formatting.dividerStyle) {
+      case 'Line': return 'border-b border-slate-200 dark:border-slate-700 pb-1 mb-2';
+      case 'Dotted': return 'border-b border-dotted border-slate-300 dark:border-slate-600 pb-1 mb-2';
+      default: return 'mb-2';
+    }
+  };
+
+  const [isGeneratingTrainingPlan, setIsGeneratingTrainingPlan] = useState(false);
+  const [isFixingGap, setIsFixingGap] = useState<string | null>(null);
+
+  const handleFixGap = async (gapName: string, option: 'A' | 'B' | 'C') => {
+    if (!tailoredCV || !cvData.jobDescription) return;
+    setIsFixingGap(`${gapName}-${option}`);
+
+    try {
+      let prompt = '';
+      if (option === 'A') {
+        prompt = `You are a CV expert. The user has a skills gap: "${gapName}". 
+        Generate 1-2 powerful CV bullet points that reframe their existing experience to address this gap without lying.
+        Use strong action verbs and quantify if possible.
+        CV Content: ${Object.values(tailoredCV).join('\n')}
+        Job Description: ${cvData.jobDescription}
+        Return ONLY the bullet points, no other text.`;
+      } else if (option === 'B') {
+        prompt = `You are a CV expert. The user has a skills gap: "${gapName}".
+        Identify existing bullet points in their CV that could be reworded to better demonstrate this skill.
+        CV Content: ${Object.values(tailoredCV).join('\n')}
+        Return a comparison: "Original: [original bullet] -> Suggested: [reworded bullet]".
+        Return ONLY the comparison, no other text.`;
+      }
+
+      if (option === 'C') {
+        const newQuestion: InterviewQuestion = {
+          question: `You mentioned a gap in ${gapName}. How would you handle a situation requiring this skill?`,
+          tip: `Focus on your ability to learn quickly and provide a related example where you successfully adapted.`,
+          category: 'Tricky Questions'
+        };
+        setInterviewPrep(prev => {
+          if (!prev) return { 'Tricky Questions': [newQuestion] };
+          return { ...prev, 'Tricky Questions': [...(prev['Tricky Questions'] || []), newQuestion] };
+        });
+        setActiveTab('interview');
+        return;
+      }
+
+      const response = await callGroq([
+        { role: 'system', content: 'You are a professional CV writer.' },
+        { role: 'user', content: prompt }
+      ]);
+
+      const content = cleanCVOutput(response);
+
+      setSkillsGap(prev => {
+        if (!prev) return null;
+        return {
+          ...prev,
+          criticalGaps: prev.criticalGaps.map(g => {
+            if (g.name === gapName) {
+              return {
+                ...g,
+                generatedBullets: option === 'A' ? content : g.generatedBullets,
+                reframeComparison: option === 'B' ? content : g.reframeComparison
+              };
+            }
+            return g;
+          })
+        };
+      });
+    } catch (err) {
+      setError('Failed to generate fix suggestion');
+    } finally {
+      setIsFixingGap(null);
+    }
+  };
+
+  const handleGenerateTrainingPlan = async () => {
+    if (!tailoredCV || !cvData.jobDescription) return;
+    setIsGeneratingTrainingPlan(true);
+
+    try {
+      const prompt = `Based on this CV and Job Description, identify 5 key study areas to bridge skills gaps and prepare for the interview.
+      CV: ${Object.values(tailoredCV).join('\n')}
+      Job Description: ${cvData.jobDescription}
+      
+      Return ONLY a JSON array of 5 objects with this structure:
+      {
+        "topic": "",
+        "whyItMatters": "",
+        "whatToStudy": "",
+        "howLong": "",
+        "freeResource": "",
+        "practiceQuestion": ""
+      }`;
+
+      const response = await callGroq([
+        { role: 'system', content: 'You are a technical interview coach. Return ONLY valid JSON.' },
+        { role: 'user', content: prompt }
+      ]);
+
+      const plan: TrainingArea[] = JSON.parse(cleanCVOutput(response));
+      setSkillsGap(prev => {
+        if (!prev) return null;
+        return { ...prev, trainingPlan: { areas: plan, lastGenerated: new Date().toISOString() } };
+      });
+    } catch (err) {
+      setError('Failed to generate training plan');
+    } finally {
+      setIsGeneratingTrainingPlan(false);
+    }
+  };
+
+  const handleYoutubeSearch = async (query: string) => {
+    try {
+      const prompt = `Generate the single most effective YouTube search query to learn about: "${query}". Return ONLY the query string.`;
+      const response = await callGroq([
+        { role: 'system', content: 'You are a search expert.' },
+        { role: 'user', content: prompt }
+      ]);
+      const searchQuery = cleanCVOutput(response).replace(/"/g, '');
+      window.open(`https://www.youtube.com/results?search_query=${encodeURIComponent(searchQuery)}`, '_blank');
+    } catch (err) {
+      window.open(`https://www.youtube.com/results?search_query=${encodeURIComponent(query)}`, '_blank');
+    }
+  };
   const handleDragOver = (e: React.DragEvent) => {
     e.preventDefault();
     setIsDragging(true);
@@ -208,6 +452,66 @@ If you cannot access the URL or it is not a job posting, say so clearly.`;
     }
   };
 
+  const handleExtractContactInfo = async (text: string) => {
+    if (!text.trim() || !apiKey) return;
+    
+    setIsExtractingContact(true);
+    const systemPrompt = `You are a precise data extraction engine. Extract ONLY the following fields from this CV text. Return ONLY a valid JSON object with no additional text, explanation, or markdown:
+
+{
+  "fullName": "",
+  "email": "",
+  "phone": "",
+  "location": "",
+  "linkedin": "",
+  "portfolio": "",
+  "github": "",
+  "website": ""
+}
+
+Rules:
+- If a field is not found, return an empty string for that field
+- For phone, return the number exactly as written in the CV
+- For location, return city and country if present
+- For linkedin, return the full URL or just the handle if that is all that is present
+- Extract ALL URLs found and assign them to the most appropriate field
+- Return NOTHING except the JSON object`;
+
+    try {
+      const result = await callGroq(text, systemPrompt);
+      // Clean potential markdown code blocks
+      const jsonStr = result.replace(/```json\n?|```/g, '').trim();
+      const data = JSON.parse(jsonStr);
+      
+      setContactInfo(prev => ({
+        ...prev,
+        ...data,
+        fullName: data.fullName || prev.fullName // Keep existing if empty
+      }));
+
+      // Track which fields were extracted for the green tick
+      const extracted = Object.keys(data).filter(key => data[key] && data[key].trim() !== '');
+      setExtractedFields(extracted);
+
+      // Also update the main name if it was empty
+      if (data.fullName && !cvData.name) {
+        setCvData(prev => ({ ...prev, name: data.fullName }));
+      }
+    } catch (err) {
+      console.error("Contact extraction failed:", err);
+    } finally {
+      setIsExtractingContact(false);
+    }
+  };
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      if (cvData.currentCV.trim() && cvData.currentCV.length > 50) {
+        handleExtractContactInfo(cvData.currentCV);
+      }
+    }, 1000);
+    return () => clearTimeout(timer);
+  }, [cvData.currentCV]);
   const handleFileUpload = async (file: File) => {
     if (file.size > 5 * 1024 * 1024) {
       setError("File exceeds 5MB limit");
@@ -251,7 +555,7 @@ If you cannot access the URL or it is not a job posting, say so clearly.`;
         text = fullText;
       } else if (extension === 'docx') {
         const arrayBuffer = await file.arrayBuffer();
-        const result = await window.mammoth.extractRawText({ arrayBuffer });
+        const result = await window.mammoth.extractRawValue({ arrayBuffer });
         text = result.value;
       }
 
@@ -330,17 +634,6 @@ If you cannot access the URL or it is not a job posting, say so clearly.`;
     }
   }, [activeTab, skillsGap, darkMode]);
 
-  const [cvData, setCvData] = useState<CVData>({
-    name: '',
-    targetJobTitle: '',
-    company: '',
-    location: '',
-    seniority: 'Mid-level',
-    industry: 'Technology',
-    currentCV: '',
-    jobDescription: ''
-  });
-
   const [tailoredCV, setTailoredCV] = useState<CVSections | null>(null);
   const [improvementTips, setImprovementTips] = useState<string[]>([]);
 
@@ -362,10 +655,14 @@ If you cannot access the URL or it is not a job posting, say so clearly.`;
     setCvData(prev => ({ ...prev, [name]: value }));
   };
 
-  const callGroq = async (prompt: string, systemPrompt: string) => {
+  const callGroq = async (messages: string | { role: string; content: string }[], systemPrompt?: string) => {
     if (!apiKey) {
       throw new Error("Please enter your Groq API key in Settings to use AI features.");
     }
+
+    const finalMessages = typeof messages === 'string' 
+      ? [{ role: "system", content: systemPrompt || "You are a professional assistant." }, { role: "user", content: messages }]
+      : messages;
 
     const response = await fetch(GROQ_API_URL, {
       method: "POST",
@@ -376,10 +673,7 @@ If you cannot access the URL or it is not a job posting, say so clearly.`;
         model: GROQ_MODEL,
         max_tokens: 4000,
         temperature: 0.7,
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: prompt }
-        ]
+        messages: finalMessages
       })
     });
 
@@ -454,34 +748,42 @@ If you cannot access the URL or it is not a job posting, say so clearly.`;
     setLoading(true);
     setError(null);
 
-    const systemPrompt = `You are an expert UK CV writer and careers advisor with 15 years of experience helping candidates land roles at top UK companies. You have deep knowledge of UK CV conventions, ATS systems, and what UK hiring managers expect.
+    const systemPrompt = `You are an expert UK CV writer. Your job is to TAILOR and ENHANCE the candidate's CV for the specific job description provided. You must follow these rules absolutely without exception:
 
-Your task is to rewrite and tailor the provided CV for the specific job description given. Follow ALL of these UK CV rules strictly:
+CONTENT RULES — NON-NEGOTIABLE:
+1. NEVER remove any job role, position, or employer from the CV — every piece of experience must remain
+2. NEVER remove any qualification, certification, or education entry
+3. NEVER remove any skill the candidate has listed
+4. NEVER add fictional experience, skills, or qualifications the candidate does not have
+5. NEVER add commentary, notes, suggestions, or explanations to the CV output — the output must be a clean, ready-to-send CV with zero meta-commentary
+6. NEVER add phrases like "Note:", "Consider adding", "You may want to", "[Add your X here]", or any instructional text
+7. The output must be 100% ready to send — a hiring manager should be able to read it immediately with no editing needed
 
-1. NEVER use American English — use British spellings throughout (organised, recognised, colour, behaviour, etc.)
-2. NEVER include personal details like date of birth, nationality, marital status, or a photo
-3. Use "Personal Profile" or "Personal Statement" NOT "Objective"
-4. Bullet points should NOT start with "I" — use action verbs instead (Delivered, Managed, Achieved, Led, Developed)
-5. Quantify achievements wherever possible (%, £, team sizes, timeframes)
-6. Use UK date format: Month YYYY (e.g. June 2022 – Present)
-7. References section must say "Available on request" — do not list actual referees
-8. Keep the CV to 2 pages maximum unless academic or very senior (then 3 max)
-9. Personal statement: 3–5 sentences, tailored to THIS specific job, under 100 words
-10. Mirror the exact language and keywords from the job description naturally
-11. Prioritise the most relevant experience for this specific role
-12. Use strong UK-appropriate action verbs: Spearheaded, Delivered, Championed, Facilitated, Liaised, Coordinated
-13. Format experience as: Job Title | Company | Location | Dates (Month YYYY – Month YYYY)
-14. Skills section should list hard skills relevant to the job description first
-15. Academic qualifications: list in reverse chronological order, use UK grading (First-class Honours, 2:1, A-levels, GCSEs)
+TAILORING RULES:
+8. Reword existing bullet points to mirror the exact language, keywords, and phrases used in the job description
+9. Reorder bullet points within each role to lead with the most relevant experience for THIS specific job
+10. Strengthen weak or vague bullet points using context from the rest of the CV
+11. Add quantification to bullet points where the existing CV provides enough context to do so honestly
+12. Ensure the personal statement uses keywords from the job description naturally
+13. Reorder the skills section to lead with skills most relevant to this job description
+14. If the job description uses specific terminology (e.g. "stakeholder management" vs "stakeholder engagement"), use their exact terminology throughout
 
-Return the CV in clearly labelled sections using these exact markers so the app can parse them:
+UK FORMAT RULES:
+15. British English throughout
+16. No personal details (DOB, nationality, photo, marital status)
+17. Dates as Month YYYY
+18. No "I" at the start of bullet points — use action verbs
+19. References: Available on request
+20. Personal Profile not Objective
+
+Return the CV in clean sections using these exact markers with no text outside them:
 [PERSONAL_STATEMENT]
 [KEY_SKILLS]
 [EXPERIENCE]
 [EDUCATION]
 [ADDITIONAL]
 
-Also provide a separate section at the end marked [IMPROVEMENT_TIPS] with 5-10 specific UK-focused tips.`;
+The output between these markers must be pure CV content only. Nothing else.`;
 
     const prompt = `
 Name: ${cvData.name}
@@ -498,13 +800,14 @@ ${cvData.jobDescription}
 
     try {
       const result = await callGroq(prompt, systemPrompt);
-      const sections = parseCVSections(result);
+      const cleanedResult = cleanCVOutput(result);
+      const sections = parseCVSections(cleanedResult);
       setTailoredCV(sections);
       
-      const tipsMatch = result.match(/\[IMPROVEMENT_TIPS\]([\s\S]*)/);
-      if (tipsMatch) {
-        setImprovementTips(tipsMatch[1].trim().split('\n').filter(t => t.trim().length > 0));
-      }
+      // Improvement tips are now generated in a separate pass or handled differently if needed
+      // But the prompt says "NEVER add commentary... to the CV output"
+      // So I'll remove the improvement tips from the main tailoring pass
+      setImprovementTips([]);
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -516,7 +819,9 @@ ${cvData.jobDescription}
     if (!tailoredCV) return;
     
     setLoading(true);
-    const systemPrompt = `You are an expert UK CV writer. Rewrite only the [${sectionKey.toUpperCase()}] section of the CV to better emphasise ${cvData.targetJobTitle} experience, making it more impactful and keyword-rich for this UK role. Follow all UK conventions.`;
+    const systemPrompt = `You are an expert UK CV writer. Rewrite only the [${sectionKey.toUpperCase()}] section of the CV to better emphasise ${cvData.targetJobTitle} experience, making it more impactful and keyword-rich for this UK role. Follow all UK conventions.
+    
+Return ONLY the rewritten section content. No preamble, no explanation, no notes, no suggestions. Pure CV content only.`;
     const prompt = `
 Target Job: ${cvData.targetJobTitle}
 Job Description: ${cvData.jobDescription}
@@ -526,7 +831,8 @@ ${tailoredCV[sectionKey]}
 
     try {
       const result = await callGroq(prompt, systemPrompt);
-      setTailoredCV(prev => prev ? { ...prev, [sectionKey]: result } : null);
+      const cleanedResult = cleanCVOutput(result);
+      setTailoredCV(prev => prev ? { ...prev, [sectionKey]: cleanedResult } : null);
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -1344,19 +1650,181 @@ Format clearly with the category markers above so the app can parse and display 
                 <div className="space-y-4">
                   <div className="space-y-2">
                     <h4 className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Critical Gaps</h4>
-                    <div className="space-y-2">
+                    <div className="space-y-3">
                       {skillsGap.criticalGaps.map((gap, i) => (
-                        <div key={i} className="p-3 rounded-xl bg-red-50/50 dark:bg-red-900/10 border border-red-100 dark:border-red-900/30">
-                          <p className="text-sm font-bold text-red-700 dark:text-red-400">{gap.name}</p>
-                          <p className="text-[10px] text-slate-600 dark:text-slate-400 mt-1">{gap.action}</p>
+                        <div key={i} className="p-3 rounded-xl bg-red-50/50 dark:bg-red-900/10 border border-red-100 dark:border-red-900/30 overflow-hidden">
+                          <div className="flex justify-between items-start mb-1">
+                            <p className="text-sm font-bold text-red-700 dark:text-red-400">{gap.name}</p>
+                            <button 
+                              onClick={() => {
+                                setSkillsGap(prev => {
+                                  if (!prev) return null;
+                                  return {
+                                    ...prev,
+                                    criticalGaps: prev.criticalGaps.map((g, idx) => idx === i ? { ...g, fixPanelOpen: !g.fixPanelOpen } : g)
+                                  };
+                                });
+                              }}
+                              className="text-[10px] font-bold text-red-600 hover:underline flex items-center gap-1"
+                            >
+                              Fix this gap <ArrowUpRight className="w-3 h-3" />
+                            </button>
+                          </div>
+                          <p className="text-[10px] text-slate-600 dark:text-slate-400">{gap.action}</p>
+                          
+                          <AnimatePresence>
+                            {gap.fixPanelOpen && (
+                              <motion.div 
+                                initial={{ height: 0, opacity: 0 }}
+                                animate={{ height: 'auto', opacity: 1 }}
+                                exit={{ height: 0, opacity: 0 }}
+                                className="mt-3 pt-3 border-t border-red-200 dark:border-red-800 space-y-3"
+                              >
+                                <div className="grid grid-cols-3 gap-2">
+                                  <button 
+                                    onClick={() => handleFixGap(gap.name, 'A')}
+                                    disabled={!!isFixingGap}
+                                    className="p-2 rounded-lg bg-white dark:bg-slate-800 border border-red-200 dark:border-red-800 text-[8px] font-bold uppercase hover:bg-red-100 transition-colors"
+                                  >
+                                    {isFixingGap === `${gap.name}-A` ? <Loader2 className="w-3 h-3 animate-spin mx-auto" /> : 'Add to CV'}
+                                  </button>
+                                  <button 
+                                    onClick={() => handleFixGap(gap.name, 'B')}
+                                    disabled={!!isFixingGap}
+                                    className="p-2 rounded-lg bg-white dark:bg-slate-800 border border-red-200 dark:border-red-800 text-[8px] font-bold uppercase hover:bg-red-100 transition-colors"
+                                  >
+                                    {isFixingGap === `${gap.name}-B` ? <Loader2 className="w-3 h-3 animate-spin mx-auto" /> : 'Reframe'}
+                                  </button>
+                                  <button 
+                                    onClick={() => handleFixGap(gap.name, 'C')}
+                                    className="p-2 rounded-lg bg-white dark:bg-slate-800 border border-red-200 dark:border-red-800 text-[8px] font-bold uppercase hover:bg-red-100 transition-colors"
+                                  >
+                                    Flag for Interview
+                                  </button>
+                                </div>
+
+                                {gap.generatedBullets && (
+                                  <div className="p-2 bg-white dark:bg-slate-800 rounded border border-red-100 dark:border-red-900/50">
+                                    <p className="text-[9px] font-bold text-slate-400 uppercase mb-1">Suggested Bullets:</p>
+                                    <p className="text-[10px] text-slate-700 dark:text-slate-300 italic">{gap.generatedBullets}</p>
+                                    <button 
+                                      onClick={() => {
+                                        setTailoredCV(prev => {
+                                          if (!prev) return null;
+                                          return { ...prev, experience: prev.experience + '\n' + gap.generatedBullets };
+                                        });
+                                      }}
+                                      className="mt-2 text-[9px] font-bold text-blue-600 hover:underline"
+                                    >
+                                      Insert into CV
+                                    </button>
+                                  </div>
+                                )}
+
+                                {gap.reframeComparison && (
+                                  <div className="p-2 bg-white dark:bg-slate-800 rounded border border-red-100 dark:border-red-900/50">
+                                    <p className="text-[9px] font-bold text-slate-400 uppercase mb-1">Reframe Suggestion:</p>
+                                    <p className="text-[10px] text-slate-700 dark:text-slate-300 whitespace-pre-wrap">{gap.reframeComparison}</p>
+                                  </div>
+                                )}
+
+                                <button 
+                                  onClick={() => handleYoutubeSearch(gap.name)}
+                                  className="w-full py-2 bg-red-600 text-white rounded-lg text-[9px] font-bold flex items-center justify-center gap-2"
+                                >
+                                  <Youtube className="w-3.5 h-3.5" /> Find YouTube tutorials ▶
+                                </button>
+                              </motion.div>
+                            )}
+                          </AnimatePresence>
                         </div>
                       ))}
                     </div>
                   </div>
 
+                  <div className="space-y-4 pt-4 border-t border-slate-100 dark:border-slate-800">
+                    <div className="flex items-center justify-between">
+                      <h4 className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Interview Training Plan</h4>
+                      {!skillsGap.trainingPlan && (
+                        <button 
+                          onClick={handleGenerateTrainingPlan}
+                          disabled={isGeneratingTrainingPlan}
+                          className="text-[10px] font-bold text-blue-500 hover:underline flex items-center gap-1"
+                        >
+                          {isGeneratingTrainingPlan ? <Loader2 className="w-3 h-3 animate-spin" /> : <Sparkles className="w-3 h-3" />}
+                          Generate Plan
+                        </button>
+                      )}
+                    </div>
+
+                    {skillsGap.trainingPlan ? (
+                      <div className="space-y-3">
+                        {skillsGap.trainingPlan.areas.map((area, i) => (
+                          <div key={i} className="p-4 rounded-xl bg-blue-50/50 dark:bg-blue-900/10 border border-blue-100 dark:border-blue-800/30 space-y-3">
+                            <div className="flex justify-between items-start">
+                              <div>
+                                <h5 className="text-sm font-bold text-blue-700 dark:text-blue-400">{area.topic}</h5>
+                                <p className="text-[10px] text-slate-500 font-medium">{area.whyItMatters}</p>
+                              </div>
+                              <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-blue-100 dark:bg-blue-900/50 text-blue-600 dark:text-blue-400">{area.howLong}</span>
+                            </div>
+                            
+                            <div className="space-y-1">
+                              <p className="text-[10px] font-bold text-slate-400 uppercase">What to study:</p>
+                              <p className="text-[11px] text-slate-700 dark:text-slate-300">{area.whatToStudy}</p>
+                            </div>
+
+                            <div className="p-2 bg-white dark:bg-slate-800 rounded-lg border border-blue-100 dark:border-blue-900/50">
+                              <p className="text-[9px] font-bold text-slate-400 uppercase mb-1">Practice Question:</p>
+                              <p className="text-[11px] font-medium italic">"{area.practiceQuestion}"</p>
+                              <button 
+                                onClick={() => {
+                                  const newQuestion: InterviewQuestion = {
+                                    question: area.practiceQuestion,
+                                    tip: `Focus on demonstrating your knowledge of ${area.topic}.`,
+                                    category: 'Technical Questions'
+                                  };
+                                  setInterviewPrep(prev => {
+                                    if (!prev) return { 'Technical Questions': [newQuestion] };
+                                    return { ...prev, 'Technical Questions': [...(prev['Technical Questions'] || []), newQuestion] };
+                                  });
+                                  setActiveTab('interview');
+                                }}
+                                className="mt-2 text-[9px] font-bold text-blue-600 hover:underline flex items-center gap-1"
+                              >
+                                <Plus className="w-3 h-3" /> Add to Interview Prep
+                              </button>
+                            </div>
+
+                            <div className="flex gap-2">
+                              <a 
+                                href={area.freeResource.startsWith('http') ? area.freeResource : `https://www.google.com/search?q=${encodeURIComponent(area.freeResource)}`}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="flex-1 py-2 bg-white dark:bg-slate-800 border border-blue-200 dark:border-blue-800 rounded-lg text-[9px] font-bold text-center hover:bg-blue-50 transition-colors"
+                              >
+                                View Resource
+                              </a>
+                              <button 
+                                onClick={() => handleYoutubeSearch(area.topic)}
+                                className="flex-1 py-2 bg-red-600 text-white rounded-lg text-[9px] font-bold flex items-center justify-center gap-2"
+                              >
+                                <Youtube className="w-3 h-3" /> YouTube ▶
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="p-8 text-center border-2 border-dashed border-slate-100 dark:border-slate-800 rounded-2xl">
+                        <p className="text-xs text-slate-400 italic">Generate a training plan to see personalized study recommendations.</p>
+                      </div>
+                    )}
+                  </div>
+
                   <div className="space-y-2">
-                    <h4 className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Development Plan</h4>
-                    <div className="p-4 rounded-xl bg-blue-50 dark:bg-blue-900/10 border border-blue-100 dark:border-blue-800/30">
+                    <h4 className="text-[10px] font-bold uppercase tracking-widest text-slate-400">General Development Plan</h4>
+                    <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-100 dark:border-slate-700">
                       <div className="text-[11px] text-slate-600 dark:text-slate-400 whitespace-pre-line">
                         {skillsGap.developmentPlan}
                       </div>
@@ -1754,62 +2222,212 @@ Format clearly with the category markers above so the app can parse and display 
           </div>
 
           {/* Content Area */}
-          <div className="flex-1 overflow-y-auto p-8 md:p-12 font-serif custom-scrollbar relative">
-            <AnimatePresence mode="wait">
-              {!tailoredCV ? (
-                <motion.div 
-                  initial={{ opacity: 0, y: 10 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: -10 }}
-                  className="h-full flex flex-col items-center justify-center text-center space-y-4"
-                >
-                  <div className="w-20 h-20 bg-slate-100 dark:bg-slate-800 rounded-full flex items-center justify-center">
-                    <FileText className="w-10 h-10 text-slate-300 dark:text-slate-600" />
-                  </div>
-                  <div>
-                    <h3 className="text-lg font-bold text-slate-900 dark:text-white font-sans">Your tailored CV will appear here</h3>
-                    <p className="text-sm text-slate-500 dark:text-slate-400 font-sans max-w-xs mx-auto">Fill in your details and click "Tailor My CV" to generate a professional UK-standard document.</p>
-                  </div>
-                </motion.div>
-              ) : (
-                <motion.div 
-                  initial={{ opacity: 0 }}
-                  animate={{ opacity: 1 }}
-                  className="space-y-8 text-slate-800 dark:text-slate-200"
-                >
-                  {/* Header */}
-                  <div className="text-center space-y-2 border-b border-slate-100 dark:border-slate-800 pb-6">
-                    <h2 className="text-3xl font-bold text-slate-900 dark:text-white uppercase tracking-tight">{cvData.name || 'Your Name'}</h2>
-                    <p className="text-lg text-blue-600 dark:text-blue-400 font-sans font-medium">{cvData.targetJobTitle || 'Target Role'}</p>
-                    <p className="text-sm text-slate-500 font-sans">London, UK • +44 7000 000000 • email@example.com • LinkedIn</p>
-                  </div>
+          <div className="flex-1 overflow-y-auto bg-white dark:bg-slate-900 custom-scrollbar relative">
+            {tailoredCV && (
+              <div className="sticky top-0 z-20 p-2 bg-white/80 dark:bg-slate-900/80 backdrop-blur-sm border-b border-slate-100 dark:border-slate-800 flex items-center justify-center gap-4">
+                <div className="flex items-center gap-2 bg-slate-100 dark:bg-slate-800 p-1 rounded-lg">
+                  <select 
+                    value={formatting.fontFamily}
+                    onChange={(e) => setFormatting(prev => ({ ...prev, fontFamily: e.target.value as any }))}
+                    className="bg-transparent text-[10px] font-bold outline-none px-1"
+                  >
+                    {['Calibri', 'Arial', 'Times New Roman', 'Georgia', 'Garamond', 'Cambria'].map(f => <option key={f} value={f}>{f}</option>)}
+                  </select>
+                  <div className="w-px h-3 bg-slate-300 dark:bg-slate-600" />
+                  <select 
+                    value={formatting.fontSize}
+                    onChange={(e) => setFormatting(prev => ({ ...prev, fontSize: e.target.value as any }))}
+                    className="bg-transparent text-[10px] font-bold outline-none px-1"
+                  >
+                    {['10pt', '11pt', '12pt', '13pt', '14pt'].map(s => <option key={s} value={s}>{s}</option>)}
+                  </select>
+                </div>
 
-                  {/* Sections */}
-                  {(['personalStatement', 'keySkills', 'experience', 'education', 'additional'] as const).map((key) => (
-                    <div key={key} className="group relative">
-                      <div className="flex items-center justify-between mb-2">
-                        <h3 className="text-sm font-bold uppercase tracking-[0.2em] text-slate-400 font-sans">
-                          {key.replace(/([A-Z])/g, ' $1')}
-                        </h3>
+                <div className="flex items-center gap-1 bg-slate-100 dark:bg-slate-800 p-1 rounded-lg">
+                  <button 
+                    onClick={() => setFormatting(prev => ({ ...prev, spacing: prev.spacing === 'Compact' ? 'Normal' : prev.spacing === 'Normal' ? 'Relaxed' : 'Compact' }))}
+                    className="p-1 hover:bg-white dark:hover:bg-slate-700 rounded transition-colors"
+                    title={`Spacing: ${formatting.spacing}`}
+                  >
+                    <AlignLeft className="w-3.5 h-3.5" />
+                  </button>
+                  <button 
+                    onClick={() => setFormatting(prev => ({ ...prev, margin: prev.margin === 'Narrow' ? 'Normal' : prev.margin === 'Normal' ? 'Wide' : 'Narrow' }))}
+                    className="p-1 hover:bg-white dark:hover:bg-slate-700 rounded transition-colors"
+                    title={`Margin: ${formatting.margin}`}
+                  >
+                    <Maximize2 className="w-3.5 h-3.5" />
+                  </button>
+                  <button 
+                    onClick={() => setFormatting(prev => ({ ...prev, dividerStyle: prev.dividerStyle === 'Line' ? 'Dotted' : prev.dividerStyle === 'Dotted' ? 'None' : 'Line' }))}
+                    className="p-1 hover:bg-white dark:hover:bg-slate-700 rounded transition-colors"
+                    title={`Divider: ${formatting.dividerStyle}`}
+                  >
+                    <Minimize2 className="w-3.5 h-3.5" />
+                  </button>
+                  <button 
+                    onClick={() => setFormatting(prev => ({ ...prev, headingStyle: prev.headingStyle === 'Bold' ? 'Uppercase' : prev.headingStyle === 'Uppercase' ? 'SmallCaps' : 'Bold' }))}
+                    className="p-1 hover:bg-white dark:hover:bg-slate-700 rounded transition-colors"
+                    title={`Heading: ${formatting.headingStyle}`}
+                  >
+                    <Type className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              </div>
+            )}
+
+            <div 
+              className="min-h-full"
+              style={getFormattingStyles()}
+            >
+              <AnimatePresence mode="wait">
+                {!tailoredCV ? (
+                  <motion.div 
+                    initial={{ opacity: 0, y: 10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: -10 }}
+                    className="h-full flex flex-col items-center justify-center text-center space-y-4 py-20"
+                  >
+                    <div className="w-20 h-20 bg-slate-100 dark:bg-slate-800 rounded-full flex items-center justify-center">
+                      <FileText className="w-10 h-10 text-slate-300 dark:text-slate-600" />
+                    </div>
+                    <div>
+                      <h3 className="text-lg font-bold text-slate-900 dark:text-white font-sans">Your tailored CV will appear here</h3>
+                      <p className="text-sm text-slate-500 dark:text-slate-400 font-sans max-w-xs mx-auto">Fill in your details and click "Tailor My CV" to generate a professional UK-standard document.</p>
+                    </div>
+                  </motion.div>
+                ) : (
+                  <motion.div 
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    className="space-y-6 text-slate-800 dark:text-slate-200"
+                  >
+                    {/* Editable Header */}
+                    <div className="text-center space-y-3 mb-8">
+                      <div className="relative group inline-block w-full">
+                        <input 
+                          type="text"
+                          value={contactInfo.fullName}
+                          onChange={(e) => setContactInfo(prev => ({ ...prev, fullName: e.target.value }))}
+                          placeholder="FULL NAME"
+                          className="w-full text-center text-3xl font-bold text-slate-900 dark:text-white uppercase tracking-tight bg-transparent border-b border-transparent hover:border-slate-200 dark:hover:border-slate-700 outline-none focus:border-blue-500 transition-all"
+                        />
+                        {extractedFields.includes('fullName') && <CheckCircle2 className="absolute -right-6 top-1/2 -translate-y-1/2 w-4 h-4 text-green-500" />}
+                      </div>
+
+                      <div className="flex flex-wrap justify-center gap-x-4 gap-y-2 text-sm font-sans text-slate-600 dark:text-slate-400">
+                        {[
+                          { key: 'email', icon: Mail, placeholder: 'Email Address', validate: (v: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v) },
+                          { key: 'phone', icon: Briefcase, placeholder: 'Phone Number', validate: (v: string) => /^(\+44|07)\d{9,10}$/.test(v.replace(/\s/g, '')) },
+                          { key: 'location', icon: Globe, placeholder: 'Location (City, UK)' },
+                          { key: 'linkedin', icon: Link, placeholder: 'LinkedIn URL' },
+                          { key: 'portfolio', icon: ExternalLink, placeholder: 'Portfolio/Website' },
+                          { key: 'github', icon: Globe, placeholder: 'GitHub' },
+                        ].map((field) => (
+                          <div key={field.key} className="flex items-center gap-1.5 group relative">
+                            <field.icon className="w-3.5 h-3.5 text-slate-400" />
+                            <input 
+                              type="text"
+                              value={contactInfo[field.key as keyof ContactInfo] as string}
+                              onChange={(e) => setContactInfo(prev => ({ ...prev, [field.key]: e.target.value }))}
+                              placeholder={field.placeholder}
+                              className="bg-transparent border-b border-transparent hover:border-slate-200 dark:hover:border-slate-700 outline-none focus:border-blue-500 transition-all min-w-[120px]"
+                              onBlur={(e) => {
+                                if (field.validate && e.target.value && !field.validate(e.target.value)) {
+                                  setError(`Invalid ${field.key} format`);
+                                }
+                              }}
+                            />
+                            <button 
+                              onClick={() => {
+                                navigator.clipboard.writeText(contactInfo[field.key as keyof ContactInfo] as string);
+                              }}
+                              className="opacity-0 group-hover:opacity-100 transition-opacity p-1 hover:text-blue-500"
+                            >
+                              <Copy className="w-3 h-3" />
+                            </button>
+                            {extractedFields.includes(field.key) && <CheckCircle2 className="w-3 h-3 text-green-500" />}
+                          </div>
+                        ))}
+                        
+                        {contactInfo.customFields?.map((cf, idx) => (
+                          <div key={idx} className="flex items-center gap-1.5 group relative">
+                            <Plus className="w-3.5 h-3.5 text-slate-400" />
+                            <input 
+                              type="text"
+                              value={cf.label}
+                              onChange={(e) => {
+                                const newFields = [...(contactInfo.customFields || [])];
+                                newFields[idx].label = e.target.value;
+                                setContactInfo(prev => ({ ...prev, customFields: newFields }));
+                              }}
+                              placeholder="Label"
+                              className="w-16 bg-transparent border-b border-transparent hover:border-slate-200 dark:hover:border-slate-700 outline-none focus:border-blue-500 transition-all font-bold uppercase text-[10px]"
+                            />
+                            <input 
+                              type="text"
+                              value={cf.value}
+                              onChange={(e) => {
+                                const newFields = [...(contactInfo.customFields || [])];
+                                newFields[idx].value = e.target.value;
+                                setContactInfo(prev => ({ ...prev, customFields: newFields }));
+                              }}
+                              placeholder="Value"
+                              className="bg-transparent border-b border-transparent hover:border-slate-200 dark:hover:border-slate-700 outline-none focus:border-blue-500 transition-all min-w-[100px]"
+                            />
+                            <button 
+                              onClick={() => {
+                                const newFields = contactInfo.customFields?.filter((_, i) => i !== idx);
+                                setContactInfo(prev => ({ ...prev, customFields: newFields }));
+                              }}
+                              className="opacity-0 group-hover:opacity-100 text-red-400 hover:text-red-500"
+                            >
+                              <X className="w-3 h-3" />
+                            </button>
+                          </div>
+                        ))}
+
                         <button 
-                          onClick={() => handleRegenerateSection(key)}
-                          className="opacity-0 group-hover:opacity-100 p-1 hover:bg-slate-100 dark:hover:bg-slate-800 rounded transition-all text-slate-400 hover:text-blue-500"
-                          title="Regenerate this section"
+                          onClick={() => setContactInfo(prev => ({ ...prev, customFields: [...(prev.customFields || []), { label: 'Field', value: '' }] }))}
+                          className="text-[10px] font-bold text-blue-500 hover:underline flex items-center gap-1"
                         >
-                          <RotateCcw className="w-3.5 h-3.5" />
+                          <Plus className="w-3 h-3" /> Add field
                         </button>
                       </div>
-                      <div 
-                        contentEditable 
-                        suppressContentEditableWarning
-                        className="text-base leading-relaxed outline-none focus:ring-1 focus:ring-blue-500/20 rounded p-1 whitespace-pre-wrap"
-                        dangerouslySetInnerHTML={{ __html: spellCheck(tailoredCV[key]) }}
-                      />
                     </div>
-                  ))}
-                </motion.div>
-              )}
-            </AnimatePresence>
+
+                    {/* Sections */}
+                    {(['personalStatement', 'keySkills', 'experience', 'education', 'additional'] as const).map((key) => (
+                      <div key={key} className="group relative">
+                        <div className="flex items-center justify-between mb-1">
+                          <h3 className={`text-sm tracking-widest font-sans text-slate-900 dark:text-white ${getHeadingStyle()} ${getDividerStyle()}`}>
+                            {key.replace(/([A-Z])/g, ' $1')}
+                          </h3>
+                          <button 
+                            onClick={() => handleRegenerateSection(key)}
+                            className="opacity-0 group-hover:opacity-100 p-1 hover:bg-slate-100 dark:hover:bg-slate-800 rounded transition-all text-slate-400 hover:text-blue-500"
+                            title="Regenerate this section"
+                          >
+                            <RotateCcw className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                        <div 
+                          contentEditable 
+                          suppressContentEditableWarning
+                          onBlur={(e) => {
+                            const newContent = e.currentTarget.innerText;
+                            setTailoredCV(prev => prev ? { ...prev, [key]: newContent } : null);
+                          }}
+                          className="text-base leading-relaxed outline-none focus:ring-1 focus:ring-blue-500/20 rounded p-1 whitespace-pre-wrap"
+                        >
+                          {tailoredCV[key]}
+                        </div>
+                      </div>
+                    ))}
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </div>
 
             {loading && (
               <div className="absolute inset-0 bg-white/80 dark:bg-slate-900/80 backdrop-blur-sm z-10 flex flex-col items-center justify-center">
